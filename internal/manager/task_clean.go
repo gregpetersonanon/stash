@@ -156,6 +156,7 @@ func newCleanFilter(c *config.Config) *cleanFilter {
 			videoExcludeRegex: generateRegexps(c.GetExcludes()),
 			imageExcludeRegex: generateRegexps(c.GetImageExcludes()),
 			stashIgnoreFilter: file.NewStashIgnoreFilter(),
+			createImageClips:  c.IsCreateImageClipsFromVideos(),
 		},
 	}
 }
@@ -212,9 +213,9 @@ func (f *cleanFilter) shouldCleanFile(path string, info fs.FileInfo, stash *conf
 	switch {
 	case info.IsDir() || fsutil.MatchExtension(path, f.zipExt):
 		return f.shouldCleanGallery(path, stash)
-	case useAsVideo(path):
+	case fsutil.MatchExtension(path, f.vidExt) && !(f.createImageClips && stash.ExcludeVideo):
 		return f.shouldCleanVideoFile(path, stash)
-	case useAsImage(path):
+	case fsutil.MatchExtension(path, f.imgExt) || (f.createImageClips && stash.ExcludeVideo && fsutil.MatchExtension(path, f.vidExt)):
 		return f.shouldCleanImage(path, stash)
 	default:
 		logger.Infof("File extension does not match any media extensions. Marking to clean: \"%s\"", path)

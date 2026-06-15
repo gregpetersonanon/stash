@@ -460,6 +460,8 @@ type handlerRequiredFilter struct {
 
 	FolderCache *lru.LRU[bool]
 
+	stashPaths               config.StashConfigs
+	createImageClips         bool
 	videoFileNamingAlgorithm models.HashAlgorithm
 }
 
@@ -473,14 +475,26 @@ func newHandlerRequiredFilter(c *config.Config, repo models.Repository) *handler
 		ImageFinder:              repo.Image,
 		GalleryFinder:            repo.Gallery,
 		FolderCache:              lru.New[bool](processes * 2),
+		stashPaths:               c.GetStashPaths(),
+		createImageClips:         c.IsCreateImageClipsFromVideos(),
 		videoFileNamingAlgorithm: c.GetVideoFileNamingAlgorithm(),
 	}
 }
 
 func (f *handlerRequiredFilter) Accept(ctx context.Context, ff models.File) bool {
 	path := ff.Base().Path
-	isVideoFile := useAsVideo(path)
-	isImageFile := useAsImage(path)
+
+	stash := f.stashPaths.GetStashFromDirPath(path)
+	matchesVideo := fsutil.MatchExtension(path, f.vidExt)
+	matchesImage := fsutil.MatchExtension(path, f.imgExt)
+
+	isVideoFile := matchesVideo
+	isImageFile := matchesImage
+	if f.createImageClips && stash != nil && stash.ExcludeVideo {
+		isVideoFile = false
+		isImageFile = matchesImage || matchesVideo
+	}
+
 	isZipFile := fsutil.MatchExtension(path, f.zipExt)
 
 	var counter fileCounter
@@ -559,6 +573,7 @@ type scanFilter struct {
 	imageExcludeRegex []*regexp.Regexp
 	minModTime        time.Time
 	stashIgnoreFilter *file.StashIgnoreFilter
+	createImageClips  bool
 }
 
 func newScanFilter(c *config.Config, repo models.Repository, minModTime time.Time) *scanFilter {
@@ -571,6 +586,7 @@ func newScanFilter(c *config.Config, repo models.Repository, minModTime time.Tim
 		imageExcludeRegex: generateRegexps(c.GetImageExcludes()),
 		minModTime:        minModTime,
 		stashIgnoreFilter: file.NewStashIgnoreFilter(),
+		createImageClips:  c.IsCreateImageClipsFromVideos(),
 	}
 }
 
@@ -597,8 +613,14 @@ func (f *scanFilter) Accept(ctx context.Context, path string, info fs.FileInfo, 
 		return false
 	}
 
-	isVideoFile := useAsVideo(path)
-	isImageFile := useAsImage(path)
+	matchesVideo := fsutil.MatchExtension(path, f.vidExt)
+	matchesImage := fsutil.MatchExtension(path, f.imgExt)
+	isVideoFile := matchesVideo
+	isImageFile := matchesImage
+	if f.createImageClips && s.ExcludeVideo {
+		isVideoFile = false
+		isImageFile = matchesImage || matchesVideo
+	}
 	isZipFile := fsutil.MatchExtension(path, f.zipExt)
 
 	if !info.IsDir() && !isVideoFile && !isImageFile && !isZipFile {
@@ -642,14 +664,6 @@ func (c *scanConfig) GetCreateGalleriesFromFolders() bool {
 	return c.createGalleriesFromFolders
 }
 
-func videoFileFilter(ctx context.Context, f models.File) bool {
-	return useAsVideo(f.Base().Path)
-}
-
-func imageFileFilter(ctx context.Context, f models.File) bool {
-	return useAsImage(f.Base().Path)
-}
-
 func galleryFileFilter(ctx context.Context, f models.File) bool {
 	return isZip(f.Base().Basename)
 }
@@ -660,9 +674,39 @@ func getScanHandlers(options ScanMetadataInput, taskQueue *job.TaskQueue, progre
 	r := mgr.Repository
 	pluginCache := mgr.PluginCache
 
+	ec := newExtensionConfig(c)
+	stashPaths := c.GetStashPaths()
+	createImageClips := c.IsCreateImageClipsFromVideos()
+
+	videoFilter := file.FilterFunc(func(ctx context.Context, f models.File) bool {
+		path := f.Base().Path
+		if !fsutil.MatchExtension(path, ec.vidExt) {
+			return false
+		}
+		if createImageClips {
+			stash := stashPaths.GetStashFromDirPath(path)
+			if stash != nil && stash.ExcludeVideo {
+				return false
+			}
+		}
+		return true
+	})
+
+	imageFilter := file.FilterFunc(func(ctx context.Context, f models.File) bool {
+		path := f.Base().Path
+		if fsutil.MatchExtension(path, ec.imgExt) {
+			return true
+		}
+		if createImageClips && fsutil.MatchExtension(path, ec.vidExt) {
+			stash := stashPaths.GetStashFromDirPath(path)
+			return stash != nil && stash.ExcludeVideo
+		}
+		return false
+	})
+
 	return []file.Handler{
 		&file.FilteredHandler{
-			Filter: file.FilterFunc(imageFileFilter),
+			Filter: imageFilter,
 			Handler: &image.ScanHandler{
 				CreatorUpdater:     r.Image,
 				GalleryFinder:      r.Gallery,
@@ -693,7 +737,7 @@ func getScanHandlers(options ScanMetadataInput, taskQueue *job.TaskQueue, progre
 			},
 		},
 		&file.FilteredHandler{
-			Filter: file.FilterFunc(videoFileFilter),
+			Filter: videoFilter,
 			Handler: &scene.ScanHandler{
 				CreatorUpdater:       r.Scene,
 				GalleryFinderUpdater: r.Gallery,

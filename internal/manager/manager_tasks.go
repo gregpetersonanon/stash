@@ -18,36 +18,9 @@ import (
 	"github.com/stashapp/stash/pkg/models"
 )
 
-func useAsVideo(pathname string) bool {
-	stash := config.StashConfigs.GetStashFromDirPath(instance.Config.GetStashPaths(), pathname)
-
-	if instance.Config.IsCreateImageClipsFromVideos() && stash != nil && stash.ExcludeVideo {
-		return false
-	}
-	return isVideo(pathname)
-}
-
-func useAsImage(pathname string) bool {
-	stash := config.StashConfigs.GetStashFromDirPath(instance.Config.GetStashPaths(), pathname)
-	if instance.Config.IsCreateImageClipsFromVideos() && stash != nil && stash.ExcludeVideo {
-		return isImage(pathname) || isVideo(pathname)
-	}
-	return isImage(pathname)
-}
-
 func isZip(pathname string) bool {
 	gExt := config.GetInstance().GetGalleryExtensions()
 	return fsutil.MatchExtension(pathname, gExt)
-}
-
-func isVideo(pathname string) bool {
-	vidExt := config.GetInstance().GetVideoExtensions()
-	return fsutil.MatchExtension(pathname, vidExt)
-}
-
-func isImage(pathname string) bool {
-	imgExt := config.GetInstance().GetImageExtensions()
-	return fsutil.MatchExtension(pathname, imgExt)
 }
 
 func getScanPaths(inputPaths []string) []*config.StashConfig {
@@ -123,6 +96,36 @@ func (s *Manager) Scan(ctx context.Context, input ScanMetadataInput) (int, error
 	}
 
 	cfg := config.GetInstance()
+	stashPaths := cfg.GetStashPaths()
+	vidExt := cfg.GetVideoExtensions()
+	imgExt := cfg.GetImageExtensions()
+	createImageClips := cfg.IsCreateImageClipsFromVideos()
+
+	videoFilter := file.FilterFunc(func(ctx context.Context, f models.File) bool {
+		path := f.Base().Path
+		if !fsutil.MatchExtension(path, vidExt) {
+			return false
+		}
+		if createImageClips {
+			stash := stashPaths.GetStashFromDirPath(path)
+			if stash != nil && stash.ExcludeVideo {
+				return false
+			}
+		}
+		return true
+	})
+
+	imageFilter := file.FilterFunc(func(ctx context.Context, f models.File) bool {
+		path := f.Base().Path
+		if fsutil.MatchExtension(path, imgExt) {
+			return true
+		}
+		if createImageClips && fsutil.MatchExtension(path, vidExt) {
+			stash := stashPaths.GetStashFromDirPath(path)
+			return stash != nil && stash.ExcludeVideo
+		}
+		return false
+	})
 
 	scanner := &file.Scanner{
 		Repository: file.NewRepository(s.Repository),
@@ -131,21 +134,26 @@ func (s *Manager) Scan(ctx context.Context, input ScanMetadataInput) (int, error
 				Decorator: &video.Decorator{
 					FFProbe: s.FFProbe,
 				},
-				Filter: file.FilterFunc(videoFileFilter),
+				Filter: videoFilter,
 			},
 			&file.FilteredDecorator{
 				Decorator: &file_image.Decorator{
 					FFProbe: s.FFProbe,
 				},
-				Filter: file.FilterFunc(imageFileFilter),
+				Filter: imageFilter,
 			},
 		},
-		FingerprintCalculator: &fingerprintCalculator{s.Config},
+		FingerprintCalculator: &fingerprintCalculator{
+			Config:           s.Config,
+			stashPaths:       stashPaths,
+			vidExt:           vidExt,
+			createImageClips: createImageClips,
+		},
 		FS:                    &file.OsFS{},
 		ZipFileExtensions:     cfg.GetGalleryExtensions(),
 		// ScanFilters is set in ScanJob.Execute
 		// HandlerRequiredFilters is set in ScanJob.Execute
-		RootPaths: cfg.GetStashPaths().Paths(),
+		RootPaths: stashPaths.Paths(),
 		Rescan:    input.Rescan,
 	}
 
