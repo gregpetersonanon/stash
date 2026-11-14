@@ -12,26 +12,12 @@ import React, { useEffect, useState } from "react";
 import { Button, Card, ProgressBar } from "react-bootstrap";
 import { FormattedMessage, useIntl } from "react-intl";
 import { Icon } from "src/components/Shared/Icon";
-import {
-  mutateStopJob,
-  useJobQueue,
-  useJobsSubscribe,
-} from "src/core/StashService";
+import { mutateStopJob } from "src/core/StashService";
 import * as GQL from "src/core/generated-graphql";
-
-type JobFragment = Pick<
-  GQL.Job,
-  | "id"
-  | "status"
-  | "subTasks"
-  | "description"
-  | "progress"
-  | "error"
-  | "startTime"
->;
+import { QueueJob, useJobQueueState } from "src/utils/job";
 
 interface IJob {
-  job: JobFragment;
+  job: QueueJob;
 }
 
 const Task: React.FC<IJob> = ({ job }) => {
@@ -207,51 +193,8 @@ const Task: React.FC<IJob> = ({ job }) => {
 
 export const JobTable: React.FC = () => {
   const intl = useIntl();
-  const jobStatus = useJobQueue();
-  const jobsSubscribe = useJobsSubscribe();
-
-  const [queue, setQueue] = useState<JobFragment[]>([]);
-
-  useEffect(() => {
-    setQueue(jobStatus.data?.jobQueue ?? []);
-  }, [jobStatus]);
-
-  useEffect(() => {
-    if (!jobsSubscribe.data) {
-      return;
-    }
-
-    const event = jobsSubscribe.data.jobsSubscribe;
-
-    function updateJob() {
-      setQueue((q) =>
-        q.map((j) => {
-          if (j.id === event.job.id) {
-            return event.job;
-          }
-
-          return j;
-        })
-      );
-    }
-
-    switch (event.type) {
-      case GQL.JobStatusUpdateType.Add:
-        // add to the end of the queue
-        setQueue((q) => q.concat([event.job]));
-        break;
-      case GQL.JobStatusUpdateType.Remove:
-        // update the job then remove after a timeout
-        updateJob();
-        setTimeout(() => {
-          setQueue((q) => q.filter((j) => j.id !== event.job.id));
-        }, 10000);
-        break;
-      case GQL.JobStatusUpdateType.Update:
-        updateJob();
-        break;
-    }
-  }, [jobsSubscribe.data]);
+  // finished jobs stay listed for 10 seconds, fading out (see Task)
+  const queue = useJobQueueState(10000);
 
   return (
     <Card className="job-table">
